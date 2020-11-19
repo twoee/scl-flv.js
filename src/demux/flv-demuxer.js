@@ -288,7 +288,9 @@ class FLVDemuxer {
         let offset = 0;
         let le = this._littleEndian;
 
+        // 如果需要解析的是FLV Header
         if (byteStart === 0) {  // buffer with FLV header
+            // 当chunk的字节数大于13的时候才开始解析，因为FLV格式的文件头就是13个字节
             if (chunk.byteLength > 13) {
                 let probeData = FLVDemuxer.probe(chunk);
                 offset = probeData.dataOffset;
@@ -303,7 +305,15 @@ class FLVDemuxer {
                 Log.w(this.TAG, 'First time parsing but chunk byteStart invalid!');
             }
 
+            // DataView的相关内容可参考：https://zhuanlan.zhihu.com/p/54273304
             let v = new DataView(chunk, offset);
+
+            // 获取 Previout Tag Size #0
+            /**
+             * getUint32为读取4个字节，返回一个32位无符号整数
+             * 第一个参数是字节偏移量，表示从哪一个字节开始读
+             * 第二个参数表示采用大端字节序还是采用小端字节序读取，true表示小端字节序
+             */
             let prevTagSize0 = v.getUint32(0, !le);
             if (prevTagSize0 !== 0) {
                 Log.w(this.TAG, 'PrevTagSize0 !== 0 !!!');
@@ -311,6 +321,7 @@ class FLVDemuxer {
             offset += 4;
         }
 
+        // 解析Tag
         while (offset < chunk.byteLength) {
             this._dispatch = true;
 
@@ -321,6 +332,7 @@ class FLVDemuxer {
                 break;
             }
 
+            // 获取Tag类型，主要分为三种，别分是音频，视频和Script Data
             let tagType = v.getUint8(0);
             let dataSize = v.getUint32(0, !le) & 0x00FFFFFF;
 
@@ -329,6 +341,7 @@ class FLVDemuxer {
                 break;
             }
 
+            // 8: 音频  9: 视频  18: Script Data
             if (tagType !== 8 && tagType !== 9 && tagType !== 18) {
                 Log.w(this.TAG, `Unsupported tag type ${tagType}, skipped`);
                 // consume the whole tag (skip it)
@@ -341,6 +354,7 @@ class FLVDemuxer {
             let ts0 = v.getUint8(6);
             let ts3 = v.getUint8(7);
 
+            // 获取时间戳
             let timestamp = ts0 | (ts1 << 8) | (ts2 << 16) | (ts3 << 24);
 
             let streamId = v.getUint32(7, !le) & 0x00FFFFFF;
@@ -348,8 +362,10 @@ class FLVDemuxer {
                 Log.w(this.TAG, 'Meet tag which has StreamID != 0!');
             }
 
+            // Tag Data的位移量
             let dataOffset = offset + 11;
 
+            // 根据不同的Tag type分别进行解析
             switch (tagType) {
                 case 8:  // Audio
                     this._parseAudioData(chunk, dataOffset, dataSize, timestamp);
