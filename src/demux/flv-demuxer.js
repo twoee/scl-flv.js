@@ -130,19 +130,34 @@ class FLVDemuxer {
         this._onDataAvailable = null;
     }
 
+    // 校验是否是标准的FLV格式，并解析是否包含音频和视频
     static probe(buffer) {
         let data = new Uint8Array(buffer);
         let mismatch = {match: false};
 
+        /**
+         * FLV格式可参考：https://juejin.im/post/6844903598476754951
+         * FLV格式分为FLV Header和FLV Body，其中FLV Header在1.0版本中为9个字节大小
+         * FLV Header中的第1、2、3字节分别存放的是F、L、V字符对应的ascii码，第4个字节存放的是FLV的版本
+         */
         if (data[0] !== 0x46 || data[1] !== 0x4C || data[2] !== 0x56 || data[3] !== 0x01) {
             return mismatch;
         }
-
+        
+        // 判断是否有音频和视频
+        /**
+         * JavaScript位运算符可参考：https://juejin.im/post/6844903568906911752
+         * FLV Header的第5个字节为flags，存放一些标志位
+         * 目前第5字节的前5个bit位保存，必须为0，第6个bit位表示是否有音频
+         * 第7个bit位保留，必须是0，第8个bit位表示是否有视频
+         */
         let hasAudio = ((data[4] & 4) >>> 2) !== 0;
         let hasVideo = (data[4] & 1) !== 0;
 
+        // 计算FLV Header的Header size
         let offset = ReadBig32(data, 5);
 
+        // 如果Header size小于9，则说明不是标准的FLV
         if (offset < 9) {
             return mismatch;
         }
