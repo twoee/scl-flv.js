@@ -513,28 +513,52 @@ class FLVDemuxer {
         let le = this._littleEndian;
         let v = new DataView(arrayBuffer, dataOffset, dataSize);
 
+        // 获取第1个字节
         let soundSpec = v.getUint8(0);
 
+        /**
+         * 具体Audio格式可参考：https://blog.csdn.net/leixiaohua1020/article/details/17934487
+         * 第1个字节表示音频数据的参数信息，从第2个字节开始就是音频数据
+         * 第一个字节的前4个bit位表示音频编码类型
+         */
         let soundFormat = soundSpec >>> 4;
+        // 2是表示是MP3 10是表示是AAC
         if (soundFormat !== 2 && soundFormat !== 10) {  // MP3 or AAC
             this._onError(DemuxErrors.CODEC_UNSUPPORTED, 'Flv: Unsupported audio codec idx: ' + soundFormat);
             return;
         }
 
+        // 第1字节的第5、6比特位表示的是采样率，此处是获取采样率
         let soundRate = 0;
+        // 12的二进制是00001100，所以& 12是屏蔽掉前4个bit位，然后右移2位，就得到了第5、6比特位表示的值
         let soundRateIndex = (soundSpec & 12) >>> 2;
         if (soundRateIndex >= 0 && soundRateIndex <= 4) {
+            /**
+             * 采样率
+             * 0  ->  5.5KHZ
+             * 1  ->  11KHZ
+             * 2  ->  22KHZ
+             * 3  ->  44KHZ
+             * 4  ->  48KHZ
+             * 对于AAC来说，值总是3，也就是说FLV封装格式并不支持48KHZ的采样率
+             */
             soundRate = this._flvSoundRateTable[soundRateIndex];
         } else {
             this._onError(DemuxErrors.FORMAT_ERROR, 'Flv: Invalid audio sample rate idx: ' + soundRateIndex);
             return;
         }
 
+        // 第1字节的第7比特位表示的是精度，0：8bit 1：16bit
         let soundSize = (soundSpec & 2) >>> 1;  // unused
+
+        // 第1字节的第8比特位表示的是音频声道，0: 单声道  1: 双声道,  AAC总是1
         let soundType = (soundSpec & 1);
 
 
+        // 第一次解析时为null
         let meta = this._audioMetadata;
+
+        // {type: 'audio', id: 2, sequenceNumber: 0, samples: [], length: 0};
         let track = this._audioTrack;
 
         if (!meta) {
@@ -559,18 +583,20 @@ class FLVDemuxer {
                 return;
             }
 
+            // accData => {packetType: 1 | 0, data: Uint8Array | {codec: ...} }
+
             if (aacData.packetType === 0) {  // AAC sequence header (AudioSpecificConfig)
                 if (meta.config) {
                     Log.w(this.TAG, 'Found another AudioSpecificConfig!');
                 }
                 let misc = aacData.data;
-                meta.audioSampleRate = misc.samplingRate;
-                meta.channelCount = misc.channelCount;
-                meta.codec = misc.codec;
-                meta.originalCodec = misc.originalCodec;
+                meta.audioSampleRate = misc.samplingRate;  // 采样率
+                meta.channelCount = misc.channelCount;  // 声道数
+                meta.codec = misc.codec;  // 音频信息（根据不同的浏览器或平台调整过）
+                meta.originalCodec = misc.originalCodec;  // 原始音频信息
                 meta.config = misc.config;
                 // The decode result of an aac sample is 1024 PCM samples
-                meta.refSampleDuration = 1024 / meta.audioSampleRate * meta.timescale;
+                meta.refSampleDuration = 1024 / meta.audioSampleRate * meta.timescale;  // 这儿没懂
                 Log.v(this.TAG, 'Parsed AudioSpecificConfig');
 
                 if (this._isInitialMetadataDispatched()) {
@@ -579,7 +605,7 @@ class FLVDemuxer {
                         this._onDataAvailable(this._audioTrack, this._videoTrack);
                     }
                 } else {
-                    this._audioInitialMetadataDispatched = true;
+                    this._audioInitialMetadataDispatched = true;  // 表示音频元信息已经初始化解析完成
                 }
                 // then notify new metadata
                 this._dispatch = false;
@@ -654,6 +680,7 @@ class FLVDemuxer {
         }
     }
 
+    // 解析AAC音频
     _parseAACAudioData(arrayBuffer, dataOffset, dataSize) {
         if (dataSize <= 1) {
             Log.w(this.TAG, 'Flv: Invalid AAC packet, missing AACPacketType or/and Data!');
@@ -663,8 +690,16 @@ class FLVDemuxer {
         let result = {};
         let array = new Uint8Array(arrayBuffer, dataOffset, dataSize);
 
+        /**
+         * AAC格式可参考：https://www.cnblogs.com/cyyljw/p/7569061.html
+         * AUDIODATA格式可参考：https://www.cnblogs.com/cslunatic/p/6042875.html 的Audio Tag部分
+         * 如果是AAC格式的AUDIODATA，则第一个字节表示的是AACPacketType
+         * 0: AAC sequence header -> 这里面包含了AudioSpecificConfig
+         * 1: AAC raw -> 直接包含的就是音频ES流
+         */
         result.packetType = array[0];
 
+        // 如果packetType是0，也就是包含了AudioSpecificConfig,所以还需要进行解析才能得到音频流数据
         if (array[0] === 0) {
             result.data = this._parseAACAudioSpecificConfig(arrayBuffer, dataOffset + 1, dataSize - 1);
         } else {
@@ -694,24 +729,29 @@ class FLVDemuxer {
         let samplingIndex = 0;
         let extensionSamplingIndex = null;
 
-        // 5 bits
+        /**
+         * 具体ACC sequence header格式可参考：https://www.jianshu.com/p/0bff0fc2bf28
+         */
+        // 5 bits  编码类型
         audioObjectType = originalAudioObjectType = array[0] >>> 3;
-        // 4 bits
+        // 4 bits  采样率索引值，可用于查询具体的采样率
         samplingIndex = ((array[0] & 0x07) << 1) | (array[1] >>> 7);
         if (samplingIndex < 0 || samplingIndex >= this._mpegSamplingRates.length) {
             this._onError(DemuxErrors.FORMAT_ERROR, 'Flv: AAC invalid sampling frequency index!');
             return;
         }
 
+        // 根据采样率索引值查询具体的采样率
         let samplingFrequence = this._mpegSamplingRates[samplingIndex];
 
-        // 4 bits
+        // 4 bits  输出声道信息
         let channelConfig = (array[1] & 0x78) >>> 3;
         if (channelConfig < 0 || channelConfig >= 8) {
             this._onError(DemuxErrors.FORMAT_ERROR, 'Flv: AAC invalid channel configuration');
             return;
         }
 
+        // LC-AAC和HE-AAC可参考：https://blog.csdn.net/leixiaohua1020/article/details/11971419
         if (audioObjectType === 5) {  // HE-AAC?
             // 4 bits
             extensionSamplingIndex = ((array[1] & 0x07) << 1) | (array[2] >>> 7);
